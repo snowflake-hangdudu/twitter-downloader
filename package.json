@@ -1,6 +1,6 @@
 {
   "name": "twitter-downloader",
-  "version": "1.0.2",
+  "version": "1.0.0",
   "private": true,
   "description": "X Downloader - Twitter Videos, GIFs & Photos",
   "scripts": {
