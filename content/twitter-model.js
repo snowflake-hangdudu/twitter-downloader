@@ -97,11 +97,13 @@
   function authorFrom(node) {
     const user = unwrapUser(node?.core) || unwrapUser(node) || node?.user || {};
     const legacy = user.legacy || user;
+    const avatarRaw = legacy.profile_image_url_https || user.avatar?.image_url || user.profile_image_url_https || legacy.profile_image_url;
+    const avatar = httpsUrl(String(avatarRaw || '').replace(/_normal(\.[a-z0-9]+)?$/i, '_400x400$1').replace(/_x96(\.[a-z0-9]+)?$/i, '_400x400$1'));
     return {
       id: text(user.rest_id || user.id_str || user.id || legacy.id_str, 80),
       username: text(legacy.screen_name || user.core?.screen_name || user.screen_name || user.username, 80).replace(/^@/, ''),
       displayName: text(legacy.name || user.core?.name || user.name || legacy.screen_name || user.core?.screen_name, 120),
-      avatar: httpsUrl(legacy.profile_image_url_https || user.avatar?.image_url || user.profile_image_url_https || legacy.profile_image_url)
+      avatar
     };
   }
 
@@ -127,7 +129,15 @@
     const result = [];
     (Array.isArray(list) ? list : []).forEach((item) => {
       if (!item?.url) return;
-      const key = item.url.split('?')[0] + '|' + (item.width || 0) + '|' + (item.height || 0) + '|' + (item.bitrate || 0);
+      // Keep query (name=orig vs name=large) — path-only keys collapsed size variants.
+      let key = item.url;
+      try {
+        const parsed = new URL(item.url);
+        const name = parsed.searchParams.get('name') || parsed.pathname.match(/:(thumb|small|medium|large|orig)$/i)?.[1] || '';
+        key = parsed.origin + parsed.pathname + '|name=' + name + '|' + (item.width || 0) + '|' + (item.height || 0) + '|' + (item.bitrate || 0);
+      } catch (_) {
+        key = item.url.split('#')[0] + '|' + (item.width || 0) + '|' + (item.height || 0) + '|' + (item.bitrate || 0);
+      }
       if (seen.has(key)) return;
       seen.add(key);
       result.push(item);
@@ -173,7 +183,7 @@
     try {
       const parsed = new URL(href);
       if (!/(^|\.)pbs\.twimg\.com$/i.test(parsed.hostname)) return href;
-      if (/\/media\//i.test(parsed.pathname)) {
+      if (/\/(?:media|card_img)\//i.test(parsed.pathname)) {
         parsed.searchParams.set('name', 'orig');
         if (!parsed.searchParams.get('format')) {
           const ext = parsed.pathname.match(/\.(jpe?g|png|webp)$/i);
@@ -181,9 +191,43 @@
         }
         return parsed.href;
       }
-      return href.replace(/:(?:thumb|small|medium|large|orig)$/i, '') + ':orig';
+      // Video thumbs (ext_tw_video_thumb / amplify_video_thumb / tweet_video_thumb)
+      // are already full frames — do not append :orig.
+      if (/\/(?:ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb|media_video_thumb)\//i.test(parsed.pathname)) {
+        return href;
+      }
+      if (/:(?:thumb|small|medium|large|orig)$/i.test(parsed.pathname)) {
+        return href.replace(/:(?:thumb|small|medium|large|orig)$/i, '') + ':orig';
+      }
+      return href;
     } catch (_) {
       return href;
+    }
+  }
+
+  function sizedImageUrl(url, name) {
+    const href = allowedMediaUrl(url);
+    if (!href || !name) return '';
+    try {
+      const parsed = new URL(href);
+      if (!/(^|\.)pbs\.twimg\.com$/i.test(parsed.hostname)) return '';
+      if (/\/(?:media|card_img)\//i.test(parsed.pathname)) {
+        parsed.searchParams.set('name', name);
+        if (!parsed.searchParams.get('format')) {
+          const ext = parsed.pathname.match(/\.(jpe?g|png|webp)$/i);
+          parsed.searchParams.set('format', ext ? ext[1].toLowerCase().replace('jpeg', 'jpg') : 'jpg');
+        }
+        return parsed.href;
+      }
+      if (/\/(?:ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb|media_video_thumb)\//i.test(parsed.pathname)) {
+        return href;
+      }
+      if (/:(?:thumb|small|medium|large|orig)$/i.test(parsed.pathname)) {
+        return href.replace(/:(?:thumb|small|medium|large|orig)$/i, '') + ':' + name;
+      }
+      return '';
+    } catch (_) {
+      return '';
     }
   }
 
@@ -192,11 +236,16 @@
     const width = Number(node?.original_info?.width || node?.sizes?.large?.w || node?.sizes?.orig?.w) || 0;
     const height = Number(node?.original_info?.height || node?.sizes?.large?.h || node?.sizes?.orig?.h) || 0;
     const raw = node?.media_url_https || node?.media_url || node?.mediaUrlHttps;
-    const orig = origImageUrl(raw);
-    const large = allowedMediaUrl(raw);
-    if (orig) list.push(candidate(orig, { width, height, mime: 'image/jpeg', source: source || 'structured' }));
-    if (large && large !== orig) list.push(candidate(large, { width, height, mime: 'image/jpeg', source: source || 'structured' }));
-    ['display_url', 'media_url_https', 'poster'].forEach((key) => {
+    const sizes = [
+      [origImageUrl(raw), width, height],
+      [sizedImageUrl(raw, 'large'), width, height],
+      [sizedImageUrl(raw, 'medium'), Math.min(width || 1200, 1200), Math.min(height || 1200, 1200)],
+      [allowedMediaUrl(raw), width, height]
+    ];
+    sizes.forEach(([href, w, h]) => {
+      if (href) list.push(candidate(href, { width: w, height: h, mime: 'image/jpeg', source: source || 'structured' }));
+    });
+    ['media_url_https', 'media_url', 'mediaUrlHttps'].forEach((key) => {
       const next = candidate(origImageUrl(node?.[key]) || node?.[key], { width, height, source: source || 'structured' });
       if (next) list.push(next);
     });
@@ -229,10 +278,85 @@
   }
 
   function mediaNodes(legacy) {
-    const extended = legacy?.extended_entities?.media || legacy?.extendedEntities?.media;
+    if (!legacy || typeof legacy !== 'object') return [];
+    const extended = legacy.extended_entities?.media
+      || legacy.extendedEntities?.media
+      || legacy.mediaDetails
+      || legacy.media_details;
     if (Array.isArray(extended) && extended.length) return extended;
-    const entities = legacy?.entities?.media;
+    const entities = legacy.entities?.media || legacy.entity_set?.media;
     if (Array.isArray(entities) && entities.length) return entities;
+    return [];
+  }
+
+  function cardBindingMap(card) {
+    const legacy = card?.legacy || card;
+    const raw = legacy?.binding_values || legacy?.bindingValues || card?.binding_values;
+    if (!raw) return {};
+    if (Array.isArray(raw)) {
+      const map = {};
+      raw.forEach((item) => {
+        if (item?.key) map[item.key] = item.value || item;
+      });
+      return map;
+    }
+    if (typeof raw === 'object') return raw;
+    return {};
+  }
+
+  function cardImageEntry(url, width, height, key) {
+    const href = allowedMediaUrl(url);
+    if (!href) return null;
+    return {
+      id_str: 'card-' + text(key || href.slice(-12), 40),
+      type: 'photo',
+      media_url_https: href,
+      original_info: {
+        width: Number(width) || 0,
+        height: Number(height) || 0
+      }
+    };
+  }
+
+  function cardMediaNodes(tweet) {
+    const card = tweet?.card || tweet?.tweet_card || tweet?.legacy?.card;
+    if (!card) return [];
+    const legacy = card.legacy || card;
+    const name = text(legacy.name || card.name, 80).split(':').pop().toLowerCase();
+    const bvals = cardBindingMap(card);
+
+    if (name === 'unified_card' || bvals.unified_card) {
+      try {
+        const raw = bvals.unified_card?.string_value
+          || bvals.unified_card?.value?.string_value
+          || bvals.unified_card?.stringValue
+          || '';
+        const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        const entities = data?.media_entities || data?.mediaEntities || {};
+        const list = Object.values(entities).filter(Boolean);
+        if (list.length) return list;
+      } catch (_) {}
+    }
+
+    // Prefer largest summary / link-preview image (blog cards, articles, etc.).
+    const prefixes = ['photo_image_full_size', 'summary_photo_image', 'thumbnail_image'];
+    const sizes = ['original', 'x_large', 'large', 'small', ''];
+    for (const prefix of prefixes) {
+      for (const size of sizes) {
+        const key = size ? prefix + '_' + size : prefix;
+        const value = bvals[key];
+        const image = value?.image_value || value?.imageValue || value;
+        const entry = cardImageEntry(image?.url, image?.width, image?.height, key);
+        if (entry) return [entry];
+      }
+    }
+
+    // Last resort: any image_value in binding_values.
+    for (const [key, value] of Object.entries(bvals)) {
+      const image = value?.image_value || value?.imageValue;
+      const entry = cardImageEntry(image?.url, image?.width, image?.height, key);
+      if (entry) return [entry];
+    }
     return [];
   }
 
@@ -267,12 +391,26 @@
     if (!tweet) return false;
     const id = tweetIdOf(tweet.rest_id || tweet.legacy?.id_str || tweet.id_str);
     if (!id) return false;
-    return Boolean(tweet.legacy || tweet.core || mediaNodes(tweet.legacy).length);
+    return Boolean(tweet.legacy || tweet.core || mediaNodes(tweet.legacy).length || cardMediaNodes(tweet).length);
   }
 
-  function makeMediaItem(node, index, source) {
+  function makeMediaItem(node, index, source, extras) {
     const type = mediaTypeOf(node);
-    const images = imageCandidatesFromApi(node, source);
+    let images = imageCandidatesFromApi(node, source);
+    // Video/GIF thumbs live on media_url_https even when variants are video-only.
+    if ((type === 'video' || type === 'gif') && !images.length) {
+      const thumb = allowedMediaUrl(node?.media_url_https || node?.media_url || node?.mediaUrlHttps);
+      if (thumb) {
+        images = [candidate(thumb, {
+          width: Number(node?.original_info?.width) || 0,
+          height: Number(node?.original_info?.height) || 0,
+          mime: 'image/jpeg',
+          source: source || 'structured'
+        })].filter(Boolean);
+      }
+    }
+    // Prefer the unmodified thumb URL as poster; size ladders stay in imageCandidates.
+    const rawThumb = allowedMediaUrl(node?.media_url_https || node?.media_url || node?.mediaUrlHttps);
     const videos = type === 'video' || type === 'gif' ? videoCandidatesFromApi(node, source) : [];
     const bestImage = pickBest(images, 'image');
     const bestVideo = pickBest(videos, 'video');
@@ -285,11 +423,12 @@
       type,
       width,
       height,
-      duration: Number(node?.video_info?.duration_millis || 0) / 1000 || 0,
-      posterUrl: bestImage?.url || '',
+      duration: Number(node?.video_info?.duration_millis || node?.videoInfo?.duration_millis || 0) / 1000 || 0,
+      posterUrl: rawThumb || bestImage?.url || '',
       mime: type === 'image' ? (bestImage?.mime || 'image/jpeg') : 'video/mp4',
       imageCandidates: images,
-      videoCandidates: videos
+      videoCandidates: videos,
+      fromQuote: Boolean(extras?.fromQuote)
     };
   }
 
@@ -305,17 +444,26 @@
     if (!tweet) return null;
     const legacy = tweet.legacy || tweet;
     const items = mediaNodes(legacy);
-    const quotedMediaOnly = items.length === 0 && Boolean(quotedTweet(tweet));
+    const cardItems = items.length ? [] : cardMediaNodes(tweet);
+    const quoted = quotedTweet(tweet);
+    const quotedNative = quoted ? mediaNodes(quoted.legacy || quoted) : [];
+    const quotedItems = quotedNative.length ? quotedNative : (quoted ? cardMediaNodes(quoted) : []);
+    const quotedMediaOnly = items.length === 0 && cardItems.length === 0 && quotedItems.length > 0;
+    // Prefer native media, then link-card preview images, then quoted media.
     let media = items.map((item, index) => makeMediaItem(item, index + 1, extras?.source || 'structured'));
-    if (!media.length) {
-      const quoted = quotedTweet(tweet);
-      if (quoted) {
-        const quotedLegacy = quoted.legacy || quoted;
-        media = mediaNodes(quotedLegacy).map((item, index) => makeMediaItem(item, index + 1, extras?.source || 'structured'));
-      }
+    if (!media.length && cardItems.length) {
+      media = cardItems.map((item, index) => makeMediaItem(item, index + 1, extras?.source || 'card'));
     }
+    if (!media.length && quotedItems.length) {
+      media = quotedItems.map((item, index) => makeMediaItem(item, index + 1, extras?.source || 'structured', { fromQuote: true }));
+    }
+    const quotedMedia = (!quotedMediaOnly && quotedItems.length)
+      ? quotedItems.map((item, index) => makeMediaItem(item, index + 1, extras?.source || 'structured', { fromQuote: true }))
+          .filter((item) => item.videoCandidates.length || item.imageCandidates.length)
+      : [];
     const valid = media.filter((item) => item.videoCandidates.length || item.imageCandidates.length);
     const author = authorFrom(tweet);
+    const quotedAuthor = quoted ? authorFrom(quoted) : { id: '', username: '', displayName: '', avatar: '' };
     const id = tweetIdOf(tweet.rest_id || legacy.id_str || tweet.id_str || extras?.shortcode);
     if (!id) return null;
     const note = tweet.note_tweet?.note_tweet_results?.result?.text || '';
@@ -329,6 +477,10 @@
       shortcode: id,
       conversationId: tweetIdOf(legacy.conversation_id_str || id),
       quotedMediaOnly,
+      fromCard: cardItems.length > 0 && items.length === 0,
+      hasQuote: Boolean(quoted),
+      quotedAuthor,
+      quotedMedia,
       pageUrl,
       title: postTitle(caption, id),
       caption,
@@ -544,14 +696,25 @@
     filterPosts(list, filters = {}) {
       const type = filters.type || 'all';
       const result = list.filter(post => {
-        if (post.quotedMediaOnly) return false;
-        const date = String(post.publishTime || '').slice(0, 10);
+        // Text-only tweets never appear — same rule as the feed download button.
         const count = post.media?.length || 0;
+        if (!count) return false;
+        const date = String(post.publishTime || '').slice(0, 10);
         return (!filters.from || date && date >= filters.from) && (!filters.to || date && date <= filters.to) &&
           (!filters.min || count >= Number(filters.min)) && (!filters.max || count <= Number(filters.max)) &&
           (type === 'all' || post.media?.some(media => media.type === type));
       });
-      result.sort((a, b) => String(b.publishTime || '').localeCompare(String(a.publishTime || '')) || String(b.id || '').localeCompare(String(a.id || '')));
+      // Match profile timeline: current page DOM order first, then remaining by time.
+      if (!filters.preserveOrder) result.sort((a, b) => {
+        const aHas = Number.isFinite(a.timelineIndex);
+        const bHas = Number.isFinite(b.timelineIndex);
+        if (aHas && bHas && a.timelineIndex !== b.timelineIndex) return a.timelineIndex - b.timelineIndex;
+        if (aHas !== bHas) return aHas ? -1 : 1;
+        const pin = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned));
+        if (pin) return pin;
+        return String(b.publishTime || '').localeCompare(String(a.publishTime || ''))
+          || String(b.id || '').localeCompare(String(a.id || ''));
+      });
       return filters.limit > 0 ? result.slice(0, Number(filters.limit)) : result;
     },
     filterTimelineAds,
@@ -582,6 +745,7 @@
     routeFromUrl,
     snapshotFromCollected,
     origImageUrl,
+    sizedImageUrl,
     STATIC_HINT
   };
 

@@ -349,9 +349,9 @@ article > .x-dl-post-entry:not(.is-inline):focus-visible {
 }
 
 #twitter-dl-root .x-creator-cover-slot {
-  flex-basis: 44px;
-  width: 44px;
-  height: 55px;
+  flex-basis: 64px;
+  width: 64px;
+  height: 36px;
 }
 
 #twitter-dl-root .x-creator-selection {
@@ -417,7 +417,7 @@ article > .x-dl-post-entry:not(.is-inline):focus-visible {
 }
 
 .dl-kit .x-dl-cover-column {
-  flex: 0 0 72px;
+  flex: 0 0 96px;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -428,9 +428,9 @@ article > .x-dl-post-entry:not(.is-inline):focus-visible {
 #twitter-dl-root .x-dl-cover-wrap,
 .dl-kit .x-dl-cover-wrap {
   position: relative;
-  width: 72px;
-  height: 90px;
-  aspect-ratio: 4 / 5;
+  width: 96px;
+  height: 54px;
+  aspect-ratio: 16 / 9;
   overflow: hidden;
   flex-shrink: 0;
   border-radius: 8px;
@@ -440,8 +440,9 @@ article > .x-dl-post-entry:not(.is-inline):focus-visible {
 
 #twitter-dl-root .x-dl-cover-wrap.is-reel,
 .dl-kit .x-dl-cover-wrap.is-reel {
-  height: 128px;
-  aspect-ratio: 9 / 16;
+  width: 96px;
+  height: 54px;
+  aspect-ratio: 16 / 9;
 }
 
 .dl-kit .x-dl-cover,
@@ -476,7 +477,7 @@ article > .x-dl-post-entry:not(.is-inline):focus-visible {
   position: static;
   z-index: 1;
   box-sizing: border-box;
-  width: 72px;
+  width: 96px;
   min-height: 26px;
   margin: 0;
   padding: 4px 4px;
@@ -1562,10 +1563,10 @@ article > .x-dl-post-entry:not(.is-inline):focus-visible {
 
 .dl-kit .x-creator-cover-slot {
   position: relative;
-  flex: 0 0 36px;
-  width: 36px;
-  height: 45px;
-  aspect-ratio: 4 / 5;
+  flex: 0 0 64px;
+  width: 64px;
+  height: 36px;
+  aspect-ratio: 16 / 9;
   border-radius: 6px;
   overflow: hidden;
   background: var(--surface-strong);
@@ -1586,9 +1587,9 @@ article > .x-dl-post-entry:not(.is-inline):focus-visible {
 }
 
 .dl-kit .x-history-cover {
-  width: 42px;
-  height: 74px;
-  aspect-ratio: 9 / 16;
+  width: 64px;
+  height: 36px;
+  aspect-ratio: 16 / 9;
   border-radius: 6px;
   background: var(--surface-strong);
   object-fit: cover;
@@ -2302,12 +2303,13 @@ article > .x-dl-post-entry:not(.is-inline):focus-visible {
 }
 
 .dl-kit .x-media-thumb {
-  width: 36px;
-  height: 45px;
+  width: 56px;
+  height: 32px;
+  aspect-ratio: 16 / 9;
   object-fit: cover;
   border-radius: 6px;
   background: var(--surface-strong);
-  flex: 0 0 36px;
+  flex: 0 0 56px;
 }
 
 .dl-kit .x-media-meta {
@@ -2466,9 +2468,9 @@ article > .x-dl-post-entry:not(.is-inline):focus-visible {
 }
 
 #twitter-dl-root .x-creator-cover-slot {
-  flex-basis: 44px;
-  width: 44px;
-  height: 58px;
+  flex-basis: 64px;
+  width: 64px;
+  height: 36px;
 }
 
 #twitter-dl-root .x-creator-item-footer,

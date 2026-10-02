@@ -6,19 +6,47 @@ const source = readFileSync(new URL('../content/content.js', import.meta.url), '
 const modelContext = vm.createContext({URL, console});
 vm.runInContext(readFileSync(new URL('../content/twitter-model.js', import.meta.url), 'utf8'), modelContext);
 const Model = modelContext.TwitterDownloaderModel;
+const pageOrderContext = vm.createContext({ Set });
+const pageOrderStart = source.indexOf('  function mergePageOrder(');
+vm.runInContext(source.slice(pageOrderStart, source.indexOf('\n  const RESOURCE_CACHE_KEY', pageOrderStart)), pageOrderContext);
+const ordered = (...args) => Array.from(pageOrderContext.mergePageOrder(...args));
+assert.deepEqual(ordered([], ['pinned', 'new', 'old']), ['pinned', 'new', 'old']);
+assert.deepEqual(ordered(['pinned', 'new', 'old'], ['old', 'older']), ['pinned', 'new', 'old', 'older'], 'scrolling must preserve earlier loaded page order');
+assert.deepEqual(ordered(['new', 'old'], ['pinned', 'new']), ['pinned', 'new', 'old'], 'a pinned post is placed exactly where the page shows it');
+assert.deepEqual(ordered(['pinned', 'new', 'old'], ['pinned', 'old', 'new']), ['pinned', 'old', 'new'], 'refresh follows page reorder');
+assert.deepEqual(Array.from(Model.filterPosts([
+  { id: 'pinned', publishTime: '2020-01-01' }, { id: 'new', publishTime: '2026-10-02' },
+], { preserveOrder: true }), post => post.id), [], 'posts without media are excluded');
 const image = {id:'im',type:'image',imageCandidates:[{url:'https://pbs.twimg.com/media/im.jpg'}]};
 const video = {id:'vid',type:'video',videoCandidates:[{url:'https://video.twimg.com/vid.mp4'}]};
 const gif = {id:'gif',type:'gif',videoCandidates:[{url:'https://video.twimg.com/gif.mp4'}]};
+assert.deepEqual(Array.from(Model.filterPosts([
+  { id: 'pinned', publishTime: '2020-01-01', media: [image] }, { id: 'new', publishTime: '2026-10-02', media: [video] },
+], { preserveOrder: true }), post => post.id), ['pinned', 'new'], 'profile order must not be replaced by date sorting');
+assert.deepEqual(Array.from(Model.filterPosts([
+  { id: 'text', publishTime: '2026-10-02', media: [] },
+  { id: 'photo', publishTime: '2026-10-02', media: [image] },
+], {}), p => p.id), ['photo'], 'text-only posts are excluded');
 const posts = [
   {id:'1',shortcode:'1',publishTime:'2026-09-01',author:{username:'alice'},media:[image]},
   {id:'2',shortcode:'2',publishTime:'2026-10-01',author:{username:'alice'},media:[video,{id:'missing',type:'image'}]},
   {id:'3',shortcode:'3',publishTime:'2026-10-02',author:{username:'alice'},media:[gif]},
   {id:'4',publishTime:'2026-10-02',quotedMediaOnly:true,media:[video]},
 ];
-assert.deepEqual(Array.from(Model.filterPosts(posts,{type:'video'}),p=>p.id),['2']);
+assert.deepEqual(Array.from(Model.filterPosts(posts,{type:'video'}),p=>p.id),['4','2']);
 assert.deepEqual(Array.from(Model.filterPosts(posts,{from:'2026-10-01',to:'2026-10-01'}),p=>p.id),['2']);
 assert.deepEqual(Array.from(Model.filterPosts(posts,{min:2,max:2}),p=>p.id),['2']);
-assert.deepEqual(Array.from(Model.filterPosts(posts,{limit:1}),p=>p.id),['3']);
+assert.deepEqual(Array.from(Model.filterPosts(posts,{limit:1}),p=>p.id),['4']);
+assert.deepEqual(
+  Array.from(Model.filterPosts([
+    { id: 'a', publishTime: '2026-10-02', media: [video], timelineIndex: 1 },
+    { id: 'b', publishTime: '2026-09-22', media: [image], pinned: true, timelineIndex: 0 },
+    { id: 'c', publishTime: '2026-09-29', media: [gif], timelineIndex: 2 },
+    { id: 'd', publishTime: '2026-09-28', media: [image] }
+  ], {}), p => p.id),
+  ['b', 'a', 'c', 'd'],
+  'page DOM order first; off-page posts follow by date'
+);
 assert.equal(Model.folderPrefix({folderLayout:'flat',creatorFolders:true},posts[0]),'');
 assert.equal(Model.folderPrefix({folderLayout:'archive'},posts[0]),'Twitter Downloads/@alice/2026-09-01/1/');
 assert.ok(!Model.folderPrefix({folderLayout:'archive'},{author:{username:'../bad'},id:'../bad',publishTime:''}).includes('../'));
@@ -37,6 +65,7 @@ const refreshContext = vm.createContext({
   requestResolve(batch) { batch.forEach(post => { refreshed.push(post.shortcode); refreshContext.creatorPosts.get(post.shortcode).ready = true; }); return 1; },
   waitForResolve: async () => {}, resolveCreatorDetail: async () => null,
   setStatus() {}, t: key => key, scheduleCreatorResolve() {},
+  pruneTextOnlyCreatorPosts() {},
 });
 const refreshStart = source.indexOf('  async function refreshCreatorPosts(');
 vm.runInContext(source.slice(refreshStart, source.indexOf('  function profileHeaderDetails()', refreshStart)), refreshContext);

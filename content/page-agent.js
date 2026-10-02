@@ -129,6 +129,21 @@
     const root = article?.querySelector('img, video') ? article : document.querySelector('[data-testid="tweetPhoto"], [data-testid="videoPlayer"]')?.closest('article');
     if (!root) return null;
     const shortcode = route.shortcode || tweetIdFromDom(root);
+    function isInQuotedRegion(node) {
+      let el = node?.parentElement;
+      while (el && el !== root) {
+        if (el.tagName === 'ARTICLE' && el !== root) return true;
+        if (el.getAttribute?.('role') === 'link') {
+          const statusLinks = [...el.querySelectorAll('a[href*="/status/"]')];
+          if (statusLinks.some((link) => {
+            const id = Model.tweetIdOf(link.getAttribute('href') || '');
+            return id && id !== shortcode;
+          })) return true;
+        }
+        el = el.parentElement;
+      }
+      return false;
+    }
     const images = [...root.querySelectorAll('img')].filter((image) => {
       if (image.closest('#twitter-dl-root')) return false;
       const href = Model.httpsUrl(image.currentSrc || image.src);
@@ -141,11 +156,21 @@
       return true;
     });
     const videos = [...root.querySelectorAll('video')].filter((video) => !video.closest('#twitter-dl-root'));
+    const ownVideos = videos.filter((video) => !isInQuotedRegion(video));
+    const quoteVideos = videos.filter((video) => isInQuotedRegion(video));
+    const useVideos = ownVideos.length ? ownVideos : quoteVideos;
+    const ownImages = images.filter((image) => !isInQuotedRegion(image));
+    const quoteImages = images.filter((image) => isInQuotedRegion(image));
+    const useImages = ownVideos.length || ownImages.length ? ownImages : quoteImages;
+    const quotedMediaOnly = !ownVideos.length && !ownImages.some((image) => {
+      const href = Model.httpsUrl(image.currentSrc || image.src);
+      return href && !Model.looksLikeAvatar(href);
+    }) && (quoteVideos.length > 0 || quoteImages.length > 0);
     const media = [];
     const seen = new Set();
     function addMedia(type, node, candidates, poster) {
       const best = Model.pickBest(candidates, type === 'image' ? 'image' : 'video');
-      if (!best && type === 'image') return;
+      if (!best) return;
       const key = best?.url?.split('?')[0] || type + '-' + media.length;
       if (seen.has(key)) return;
       seen.add(key);
@@ -161,10 +186,11 @@
         imageCandidates: type === 'image' ? Model.sortImageCandidates(candidates) : Model.sortImageCandidates(poster ? [{
           url: poster, mime: 'image/jpeg', width: 0, height: 0, bitrate: 0, sizeBytes: 0, source: 'dom', backupUrls: []
         }] : []),
-        videoCandidates: type === 'image' ? [] : Model.sortVideoCandidates(candidates)
+        videoCandidates: type === 'image' ? [] : Model.sortVideoCandidates(candidates),
+        fromQuote: quotedMediaOnly
       });
     }
-    videos.forEach((video) => {
+    useVideos.forEach((video) => {
       const list = [];
       const src = Model.allowedMediaUrl(video.currentSrc || video.src);
       if (src) list.push({ url: src, mime: 'video/mp4', width: video.videoWidth || 0, height: video.videoHeight || 0, bitrate: 0, sizeBytes: 0, source: 'dom', backupUrls: [] });
@@ -174,7 +200,7 @@
       });
       addMedia(/gif/i.test(video.getAttribute('aria-label') || '') ? 'gif' : 'video', video, list, Model.allowedMediaUrl(video.poster));
     });
-    if (!videos.length) images.forEach((image) => addMedia('image', image, candidatesFromImage(image), Model.origImageUrl(image.currentSrc || image.src)));
+    if (!useVideos.length) useImages.forEach((image) => addMedia('image', image, candidatesFromImage(image), Model.origImageUrl(image.currentSrc || image.src)));
     if (!media.length) return null;
     const userLink = root.querySelector('a[href^="/"][role="link"]');
     const username = route.username || Model.text(userLink?.getAttribute('href'), 80).split('/').filter(Boolean)[0] || '';
@@ -186,7 +212,10 @@
       title: Model.postTitle(caption, shortcode),
       caption,
       publishTime: '',
-      isPartial: media.length > 1 && !videos.length,
+      quotedMediaOnly,
+      hasQuote: quotedMediaOnly || quoteVideos.length > 0 || quoteImages.length > 0,
+      quotedMedia: [],
+      isPartial: media.length > 1 && !useVideos.length,
       kind: media.length > 1 ? 'carousel' : media[0].type,
       author: { id: '', username, displayName: username, avatar: '' },
       media

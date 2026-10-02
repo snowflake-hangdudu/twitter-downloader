@@ -101,6 +101,8 @@ assert.equal(photoPost.kind, 'image');
 assert.equal(photoPost.author.username, 'alice');
 assert.equal(photoPost.media[0].type, 'image');
 assert.match(photoPost.media[0].imageCandidates[0].url, /name=orig/);
+assert.ok(photoPost.media[0].imageCandidates.some((item) => /name=large/.test(item.url)));
+assert.ok(photoPost.media[0].posterUrl);
 assert.equal(photoPost.title, 'Hello from a photo');
 
 const videoPost = Model.makePost(video);
@@ -118,6 +120,13 @@ assert.equal(Model.snapshotFromCollected(Model.routeFromUrl('https://x.com/bob/m
 assert.equal(videoPost.kind, 'video');
 assert.equal(videoPost.media[0].videoCandidates[0].url, 'https://video.twimg.com/high.mp4');
 assert.equal(videoPost.media[0].videoCandidates.some((item) => /\.m3u8/.test(item.url)), false);
+assert.ok(videoPost.media[0].posterUrl.includes('COVER.jpg'));
+assert.ok(!/:orig$/i.test(videoPost.media[0].posterUrl), 'video poster must not append :orig to media thumbs');
+
+// Video thumb paths like ext_tw_video_thumb must stay intact for list covers.
+const videoThumbUrl = 'https://pbs.twimg.com/ext_tw_video_thumb/123/pu/img/frame.jpg';
+assert.equal(Model.origImageUrl(videoThumbUrl), videoThumbUrl);
+assert.equal(Model.sizedImageUrl(videoThumbUrl, 'large'), videoThumbUrl);
 
 const gifPost = Model.makePost(gif);
 assert.equal(gifPost.kind, 'gif');
@@ -175,6 +184,95 @@ quoteReply.quoted_status_result = {result:photo};
 const threadBag = collect({data:{tweets:[threadRoot,ownReply,foreignReply,quoteReply]}});
 const threadSnapshot=Model.snapshotFromCollected(Model.routeFromUrl('https://x.com/bob/status/'+threadRoot.rest_id),threadBag);
 assert.deepEqual(Array.from(threadSnapshot.threadPosts,post=>post.id),[threadRoot.rest_id,ownReply.rest_id]);
+
+// Quote with own video: keep outer author media, expose quoted media separately.
+const quoteWithOwn = structuredClone(video);
+quoteWithOwn.rest_id = quoteWithOwn.legacy.id_str = '2108318550127464962';
+quoteWithOwn.legacy.full_text = 'Use Grok Voice in fal to build intelligent agents';
+quoteWithOwn.quoted_status_result = { result: photo };
+const quoteOwnPost = Model.makePost(quoteWithOwn);
+assert.equal(quoteOwnPost.quotedMediaOnly, false);
+assert.equal(quoteOwnPost.hasQuote, true);
+assert.equal(quoteOwnPost.kind, 'video');
+assert.equal(quoteOwnPost.media[0].videoCandidates[0].url, 'https://video.twimg.com/high.mp4');
+assert.ok(quoteOwnPost.media[0].posterUrl.includes('COVER.jpg') || quoteOwnPost.media[0].imageCandidates.length);
+assert.equal(quoteOwnPost.quotedMedia.length, 1);
+assert.equal(quoteOwnPost.quotedMedia[0].type, 'image');
+assert.equal(quoteOwnPost.quotedAuthor.username, 'alice');
+
+// Quote-only reply: fall back to quoted media so Current Item can still download.
+const quoteOnly = Model.makePost(quoteReply);
+assert.equal(quoteOnly.quotedMediaOnly, true);
+assert.equal(quoteOnly.media[0].type, 'image');
+assert.equal(quoteOnly.media[0].fromQuote, true);
+assert.equal(Model.filterPosts([quoteOnly], { type: 'all' }).length, 1);
+
+// Quote-only with quoted video must stay downloadable in creator lists.
+const quoteVideoOnly = structuredClone(quoteReply);
+quoteVideoOnly.rest_id = quoteVideoOnly.legacy.id_str = '7777777777777777777';
+quoteVideoOnly.quoted_status_result = { result: structuredClone(video) };
+quoteVideoOnly.quoted_status_result.result.core.user_results.result.legacy.screen_name = 'fal';
+const quoteVideoPost = Model.makePost(quoteVideoOnly);
+assert.equal(quoteVideoPost.quotedMediaOnly, true);
+assert.equal(quoteVideoPost.kind, 'video');
+assert.equal(quoteVideoPost.media[0].videoCandidates[0].url, 'https://video.twimg.com/high.mp4');
+assert.equal(quoteVideoPost.quotedAuthor.username, 'fal');
+assert.equal(Model.filterPosts([quoteVideoPost], { type: 'video' }).length, 1);
+
+const quoteVideoThumb = structuredClone(video);
+quoteVideoThumb.legacy.extended_entities.media[0].media_url_https = videoThumbUrl;
+const quoteThumbOnly = structuredClone(quoteReply);
+quoteThumbOnly.rest_id = quoteThumbOnly.legacy.id_str = '8888888888888888888';
+quoteThumbOnly.quoted_status_result = { result: quoteVideoThumb };
+const quoteThumbPost = Model.makePost(quoteThumbOnly);
+assert.equal(quoteThumbPost.media[0].posterUrl, videoThumbUrl);
+assert.ok(quoteThumbPost.media[0].imageCandidates.some((item) => item.url === videoThumbUrl));
+
+// Link-preview / summary card images (e.g. blog.latch.bio) live in card.binding_values.
+const cardTweet = {
+  rest_id: '2100000000000000001',
+  core: { user_results: { result: { legacy: { screen_name: 'SpaceXAI', name: 'SpaceXAI' } } } },
+  legacy: {
+    id_str: '2100000000000000001',
+    full_text: "Read LatchBio's blog on their evaluation of Grok 4.5's biological capabilities and safeguards:",
+    created_at: 'Tue Sep 02 12:00:00 +0000 2025'
+  },
+  card: {
+    legacy: {
+      name: 'summary_large_image',
+      binding_values: [
+        {
+          key: 'photo_image_full_size_original',
+          value: {
+            type: 'IMAGE',
+            image_value: {
+              url: 'https://pbs.twimg.com/card_img/2100000000000000001/AbCdEfGh?format=jpg&name=orig',
+              width: 1200,
+              height: 628
+            }
+          }
+        },
+        {
+          key: 'thumbnail_image_large',
+          value: {
+            type: 'IMAGE',
+            image_value: {
+              url: 'https://pbs.twimg.com/card_img/2100000000000000001/AbCdEfGh?format=jpg&name=800x418',
+              width: 800,
+              height: 418
+            }
+          }
+        }
+      ]
+    }
+  }
+};
+const cardPost = Model.makePost(cardTweet);
+assert.equal(cardPost.fromCard, true);
+assert.equal(cardPost.kind, 'image');
+assert.equal(cardPost.media.length, 1);
+assert.match(cardPost.media[0].imageCandidates[0].url, /card_img/);
+assert.ok(cardPost.media[0].posterUrl.includes('card_img'));
 
 // The capture layer keeps Posts and Media categories separate even when the
 // same user's data has already been captured elsewhere in the tab.

@@ -71,7 +71,9 @@
   async function refreshSavedMarks() {
     savedMediaKeys = await completedKeys();
   }
-  function filteredCreatorPosts() { return Model.filterPosts(categoryPosts(), creatorFilters); }
+  function filteredCreatorPosts() {
+    return Model.filterPosts(categoryPosts(), { ...creatorFilters, preserveOrder: true });
+  }
   function creatorItems(post) {
     return (post.media || []).filter(media => creatorFilters.type === 'all' || media.type === creatorFilters.type);
   }
@@ -121,9 +123,107 @@
     if (/\/likes\/?$/i.test(location.pathname)) return creatorKey + ':likes';
     return creatorKey + ':posts';
   };
+  function postHasMedia(post) {
+    // Keep only posts that either already have media URLs, or are videos awaiting resolve.
+    return Boolean(post?.media?.some((media) =>
+      media && (
+        media.imageCandidates?.length
+        || media.videoCandidates?.length
+        || Model.allowedMediaUrl(media.posterUrl || '')
+        || media.type === 'video'
+        || media.type === 'gif'
+      )
+    ));
+  }
+
+  function postHasDownloadableMedia(post) {
+    // Same bar as the feed download button: only keep posts that can yield a file.
+    return Boolean(post?.media?.some((media) =>
+      Boolean(media?.imageCandidates?.length || media?.videoCandidates?.length || Model.allowedMediaUrl(media?.posterUrl || ''))
+    ));
+  }
+
   function categoryPosts() {
     const ids = creatorCategories.get(creatorCategory()) || new Set();
-    return [...creatorPosts.values()].filter((post) => ids.has(post.shortcode || post.id));
+    return [...ids].map(id => creatorPosts.get(id)).filter((post) => post && postHasMedia(post));
+  }
+
+  function registerCreatorCategoryIds(posts, category = creatorCategory()) {
+    if (!creatorCategories.has(category)) creatorCategories.set(category, new Set());
+    const ids = creatorCategories.get(category);
+    const previousOrder = [...ids];
+    const observed = [];
+    (Array.isArray(posts) ? posts : []).forEach((post) => {
+      const id = post?.shortcode || post?.id;
+      if (!id || !postHasMedia(post)) return;
+      ids.add(id);
+      observed.push(id);
+    });
+    if (observed.length) {
+      creatorCategories.set(category, new Set(
+        mergePageOrder(previousOrder, observed).filter((id) => {
+          const post = creatorPosts.get(id);
+          return postHasMedia(post) || observed.includes(id);
+        })
+      ));
+    }
+    return ids;
+  }
+
+  function pruneTextOnlyCreatorPosts(category = creatorCategory()) {
+    const ids = creatorCategories.get(category);
+    if (!ids) return;
+    for (const id of [...ids]) {
+      const post = creatorPosts.get(id);
+      if (!post) { ids.delete(id); continue; }
+      // Drop pure text and permanently empty stubs (no poster / candidates after resolve).
+      if (!post.media?.length) {
+        ids.delete(id);
+        continue;
+      }
+      if (post.resolvedAt && !postHasDownloadableMedia(post)) ids.delete(id);
+    }
+  }
+
+  function profilePostsFromSnapshot(payload) {
+    return (payload?.posts || []).filter((post) =>
+      post?.author?.username?.toLowerCase() === String(creatorKey).toLowerCase()
+      && postHasMedia(post));
+  }
+
+  function refreshProfileCreatorData(payload = snapshot) {
+    if (snapshot.kind !== 'profile') return;
+    scanDomCreatorPosts();
+    const incoming = profilePostsFromSnapshot(payload);
+    registerCreatorCategoryIds(incoming);
+    mergeCreatorPosts(incoming);
+    pruneTextOnlyCreatorPosts();
+    incoming.forEach((post) => { if (creatorReady(post)) cacheResolved(post); });
+    scheduleCreatorResolve();
+  }
+
+  let profileScanTimers = [];
+  function scheduleProfileDomScan() {
+    profileScanTimers.forEach((timer) => clearTimeout(timer));
+    profileScanTimers = [];
+    if (snapshot.kind !== 'profile') return;
+    [120, 400, 1000].forEach((delay) => {
+      profileScanTimers.push(window.setTimeout(() => {
+        if (snapshot.kind !== 'profile') return;
+        scanDomCreatorPosts();
+        registerCreatorCategoryIds(categoryPosts());
+        if (shell.panel?.isOpen?.()) renderCreator();
+      }, delay));
+    });
+  }
+
+  function mergePageOrder(previous, observed) {
+    if (!observed.length) return previous;
+    const seen = new Set(observed);
+    const anchor = previous.findIndex(id => seen.has(id));
+    const before = anchor < 0 ? previous : previous.slice(0, anchor);
+    const after = anchor < 0 ? [] : previous.slice(anchor);
+    return [...before.filter(id => !seen.has(id)), ...observed, ...after.filter(id => !seen.has(id))];
   }
   const RESOURCE_CACHE_KEY = 'twitter-dl-resources-v3';
   const RESOURCE_TTL = 6 * 60 * 60 * 1000;
@@ -298,6 +398,10 @@
       const src = media.currentSrc || media.src || '';
       return !/profile_images|profile_banners/i.test(src);
     });
+  }
+  // Keep list discovery aligned with the feed download button: media only.
+  function profileArticleCollectible(article) {
+    return feedHasMedia(article);
   }
   function feedHeaderMore(article) {
     return article.querySelector('[data-testid="caret"]')
@@ -522,6 +626,7 @@
         title: '公告',
         pinned: ['仅保存你在 X 页面中可正常访问、且有权保存的公开内容。'],
         recent: [
+          '1.0.1：引用/卡片媒体下载、主页初始列表、纯文字过滤、预览比例与入口文案。',
           '1.0.0：支持识别当前推文、多图选择、时间线入口和用户主页扫描。',
           '可保存视频、GIF 与图片；下载任务支持暂停、继续、取消和重试。',
           '默认隐藏首页推广推，可在设置中关闭。'
@@ -607,7 +712,12 @@
   });
 
   document.getElementById('twitter-dl-toggle')?.addEventListener('click', () => {
-    setTimeout(() => { if (snapshot.kind === 'profile') scanDomCreatorPosts(); renderView(); }, 0);
+    if (snapshot.kind === 'profile') {
+      refreshProfileCreatorData();
+      scheduleProfileDomScan();
+      window.postMessage({ source: CONTENT_SOURCE, type: 'GET_SNAPSHOT' }, location.origin);
+    }
+    renderView();
   });
 
   function node(parent, tag, className, value) {
@@ -991,14 +1101,40 @@
   }
 
   function previewUrls(media) {
-    const images = [...(media?.imageCandidates || [])].sort((a, b) => (a.width || 0) - (b.width || 0));
-    const preferred = images.filter((item) => (item.width || 0) >= 300);
-    return [...new Set([...preferred, ...images].map((item) => Model.httpsUrl(item.url)).concat(Model.httpsUrl(media?.posterUrl || '')).filter(Boolean))];
+    const images = Model.sortImageCandidates([...(media?.imageCandidates || [])]);
+    const preferred = images.filter((item) => (item.width || 0) >= 300 || /name=(?:orig|large)|:orig|:large|video_thumb/i.test(item.url || ''));
+    const ordered = [...preferred, ...images];
+    const urls = [];
+    const seen = new Set();
+    function push(url) {
+      const href = Model.httpsUrl(url);
+      if (!href || seen.has(href)) return;
+      seen.add(href);
+      urls.push(href);
+    }
+    // Poster first for videos — raw thumb is most reliable for list covers.
+    push(media?.posterUrl);
+    ordered.forEach((item) => push(item.url));
+    // Expand pbs size ladder so a dead name=orig still shows a cover.
+    [...urls].forEach((href) => {
+      try {
+        const parsed = new URL(href);
+        if (!/(^|\.)pbs\.twimg\.com$/i.test(parsed.hostname)) return;
+        if (/\/(?:media|card_img)\//i.test(parsed.pathname)) {
+          ['large', 'medium', 'small'].forEach((name) => {
+            parsed.searchParams.set('name', name);
+            push(parsed.href);
+          });
+        }
+      } catch (_) {}
+    });
+    return urls;
   }
   function setMediaPreview(img, media, failed) {
     const urls = previewUrls(media);
     let index = 0;
-    img.removeAttribute('referrerpolicy');
+    // twimg blocks extension-origin referrers; keep no-referrer for covers.
+    img.referrerPolicy = 'no-referrer';
     img.addEventListener('error', () => {
       index += 1;
       if (index < urls.length) img.src = urls[index];
@@ -1009,6 +1145,24 @@
   }
   function coverUrl(post, media) {
     return previewUrls(media)[0] || Model.httpsUrl(post?.author?.avatar || '');
+  }
+
+  function showCreatorVideoCover(slot, media, placeholder) {
+    if (!['video', 'gif'].includes(media?.type)) return;
+    const url = Model.httpsUrl(pickResource(media)?.url || '');
+    if (!url) return;
+    const video = node(slot, 'video', 'x-creator-cover');
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    video.setAttribute('aria-hidden', 'true');
+    video.addEventListener('loadedmetadata', () => {
+      // A still frame also covers videos whose thumbnail URL is missing/expired.
+      try { video.currentTime = Math.min(0.1, Number.isFinite(video.duration) ? video.duration / 2 : 0.1); } catch (_) {}
+    });
+    video.addEventListener('loadeddata', () => placeholder.classList.add('hidden'));
+    video.addEventListener('error', () => { video.remove(); placeholder.classList.remove('hidden'); });
+    video.src = url;
   }
 
   function renderCurrent() {
@@ -1064,6 +1218,12 @@
       authorLink.title = author.displayName || authorName;
     });
     node(side, 'div', 'x-dl-video-sub', [pageTypeLabel(post), post.shortcode, t('mediaCount', { count: post.media.length })].filter(Boolean).join(' · '));
+    if (post.quotedMediaOnly) {
+      const quotedName = post.quotedAuthor?.username ? '@' + post.quotedAuthor.username : '';
+      node(side, 'p', 'x-muted', t('quotedMediaHint', { user: quotedName || t('quotedAuthorFallback') }));
+    } else if (post.quotedMedia?.length) {
+      node(side, 'p', 'x-muted', t('ownPlusQuotedHint', { count: post.quotedMedia.length }));
+    }
 
     if (post.media.length === 1) {
       const media = post.media[0];
@@ -1081,6 +1241,11 @@
         taskFilename(post, media, resource).then((name) => { previewName.textContent = t('saveAs') + name; }).catch(() => {});
         if (media.type === 'video') button(currentBody, t('downloadVideo'), 'x-dl-btn x-dl-start', () => enqueueMedia(post, [media]));
         else button(currentBody, t('downloadImage'), 'x-dl-btn x-dl-start', () => enqueueMedia(post, [media]));
+      }
+      if (post.quotedMedia?.length) {
+        button(currentBody, t('downloadQuotedMedia', { count: post.quotedMedia.length }), 'x-mini-button', () => {
+          enqueueMedia(post, post.quotedMedia);
+        });
       }
     } else {
       const tools = node(currentBody, 'div', 'x-list-toolbar');
@@ -1119,6 +1284,11 @@
         enqueueMedia(post, items);
       });
       download.disabled = selectedMedia.size === 0;
+      if (post.quotedMedia?.length) {
+        button(currentBody, t('downloadQuotedMedia', { count: post.quotedMedia.length }), 'x-mini-button', () => {
+          enqueueMedia(post, post.quotedMedia);
+        });
+      }
     }
   }
 
@@ -1155,6 +1325,13 @@
         kind: incomingMedia.some((item) => item.imageCandidates?.length || item.videoCandidates?.length)
           ? post.kind : (previous?.kind || post.kind),
         title,
+        publishTime: post.publishTime || previous?.publishTime || '',
+        pinned: post.onPage ? Boolean(post.pinned) : Boolean(post.pinned || previous?.pinned),
+        timelineIndex: post.onPage
+          ? post.timelineIndex
+          : (Number.isFinite(post.timelineIndex) ? post.timelineIndex
+            : (Number.isFinite(previous?.timelineIndex) ? previous.timelineIndex : undefined)),
+        onPage: post.onPage === true ? true : (post.onPage === false ? false : Boolean(previous?.onPage)),
         pageUrl: post.pageUrl || previous?.pageUrl || '',
         author: { ...(previous?.author || {}), ...(post.author || {}) },
         authors: [...(post.authors || []), ...(previous?.authors || [])].filter((author, index, list) =>
@@ -1204,6 +1381,12 @@
   }
 
   function creatorPostTitle(link, card, image, shortcode) {
+    const tweetText = card?.querySelector?.('[data-testid="tweetText"]')?.innerText
+      || link?.closest?.('article')?.querySelector?.('[data-testid="tweetText"]')?.innerText;
+    if (tweetText) {
+      const line = String(tweetText).replace(/\s+/g, ' ').trim().slice(0, 120);
+      if (line) return line;
+    }
     const candidates = [link.getAttribute('aria-label'), link.getAttribute('title'), image?.alt];
     for (const candidate of candidates) {
       const value = String(candidate || '').trim();
@@ -1212,40 +1395,126 @@
     return t('twitterPostFallback', { id: shortcode });
   }
 
+  function isPinnedArticle(article) {
+    const context = article.querySelector('[data-testid="socialContext"]');
+    if (!context) return false;
+    const label = String(context.textContent || '').replace(/\s+/g, ' ').trim();
+    return /^(?:已置顶|置顶(?:推文)?|Pinned(?:\s+Tweet)?)$/i.test(label)
+      || /^(?:已置顶|置顶|Pinned)\b/i.test(label);
+  }
+
   function scanDomCreatorPosts() {
     if (Model.routeFromUrl(location.href).kind !== 'profile') return;
-    const username = snapshot.creator?.username || Model.routeFromUrl(location.href).username || '';
+    const username = String(snapshot.creator?.username || Model.routeFromUrl(location.href).username || '').replace(/^@/, '');
+    if (!username) return;
     const posts = [];
     const seen = new Set();
     const category = creatorCategory();
     if (!creatorCategories.has(category)) creatorCategories.set(category, new Set());
     const ids = creatorCategories.get(category);
-    for (const link of document.querySelectorAll('main a[href*="/status/"]')) {
+    const previousOrder = [...ids];
+    // Clear stale page-order: scrolled-away tweets must not keep old top indices.
+    for (const id of ids) {
+      const post = creatorPosts.get(id);
+      if (!post) continue;
+      post.timelineIndex = undefined;
+      post.onPage = false;
+    }
+    const articles = (document.querySelector('main, [data-testid="primaryColumn"]') || document)
+      .querySelectorAll('article[data-testid="tweet"], article');
+    let timelineIndex = 0;
+    for (const article of articles) {
       if (seen.size >= 300) break;
-      if (link.closest('#twitter-dl-root')) continue;
+      if (article.closest('#twitter-dl-root') || !profileArticleCollectible(article)) continue;
+      const postLink = [...article.querySelectorAll('a[href*="/status/"]')].find((link) => {
+        try {
+          const url = new URL(link.href, location.href);
+          if (url.hostname !== location.hostname) return false;
+          const linkedUsername = decodeURIComponent(url.pathname.split('/')[1] || '').toLowerCase();
+          return linkedUsername === username.toLowerCase() && /\/status(?:es)?\/\d+/i.test(url.pathname);
+        } catch (_) { return false; }
+      });
+      if (!postLink) continue;
       let url;
-      try { url = new URL(link.href, location.href); } catch (_) { continue; }
-      if (url.hostname !== location.hostname) continue;
-      const linkedUsername = decodeURIComponent(url.pathname.split('/')[1] || '').toLowerCase();
-      if (linkedUsername !== username.toLowerCase()) continue;
+      try { url = new URL(postLink.href, location.href); } catch (_) { continue; }
       const route = creatorPostRoute(url);
       if (!route?.shortcode || seen.has(route.shortcode)) continue;
       seen.add(route.shortcode);
       ids.add(route.shortcode);
-      if (creatorPosts.get(route.shortcode)?.media?.[0]?.posterUrl) continue;
-      const card = creatorPostCard(link);
-      const image = link.querySelector('img') || card.querySelector('img');
-      const posterUrl = imageFromNode(link) || imageFromNode(card);
-      const title = creatorPostTitle(link, card, image, route.shortcode);
-      const pageUrl = username
-        ? 'https://x.com/' + encodeURIComponent(username) + '/status/' + route.shortcode
-        : 'https://x.com/i/web/status/' + route.shortcode;
-      posts.push({ id: route.shortcode, shortcode: route.shortcode, pageUrl,
-        title, kind: 'image', author: { username },
-        media: [{ id: route.shortcode + '-1', index: 1, type: 'image', posterUrl,
-          imageCandidates: [], videoCandidates: [] }] });
+      const order = timelineIndex;
+      timelineIndex += 1;
+      const pinned = isPinnedArticle(article);
+      const existing = creatorPosts.get(route.shortcode);
+      const card = creatorPostCard(postLink) || article;
+      const image = article.querySelector('img[src*="media"], img[src*="card_img"], img[src*="ext_tw_video_thumb"], img[src*="amplify_video_thumb"], img[src*="tweet_video_thumb"]')
+        || [...article.querySelectorAll('img')].find((img) => {
+          const src = img.currentSrc || img.src || '';
+          return src && !/profile_images|profile_banners/i.test(src) && (img.naturalWidth || img.width || 0) >= 64;
+        })
+        || postLink.querySelector('img')
+        || card.querySelector('img');
+      const videoEl = article.querySelector('video');
+      const posterUrl = Model.allowedMediaUrl(videoEl?.poster || '')
+        || imageFromNode(image)
+        || imageFromNode(article)
+        || imageFromNode(card);
+      const title = creatorPostTitle(postLink, article, image, route.shortcode);
+      const timeEl = article.querySelector('time[datetime]');
+      let publishTime = '';
+      if (timeEl?.dateTime) {
+        const parsed = Date.parse(timeEl.dateTime);
+        if (Number.isFinite(parsed)) publishTime = new Date(parsed).toISOString();
+      }
+      const pageUrl = 'https://x.com/' + encodeURIComponent(username) + '/status/' + route.shortcode;
+      const imageCandidates = [];
+      const allowedPoster = Model.allowedMediaUrl(posterUrl);
+      if (allowedPoster) {
+        const variants = [
+          Model.origImageUrl(allowedPoster),
+          Model.sizedImageUrl ? Model.sizedImageUrl(allowedPoster, 'large') : '',
+          allowedPoster
+        ].filter(Boolean);
+        variants.forEach((url) => {
+          if (!imageCandidates.some((item) => item.url === url)) {
+            imageCandidates.push({
+              url, mime: 'image/jpeg', width: 0, height: 0, bitrate: 0, sizeBytes: 0, source: 'dom', backupUrls: []
+            });
+          }
+        });
+      }
+      const media = existing?.media?.length ? existing.media.map((item, index) => {
+        if (index !== 0) return item;
+        const next = { ...item };
+        if (posterUrl && !next.posterUrl) next.posterUrl = allowedPoster || posterUrl;
+        if (imageCandidates.length && !(next.imageCandidates || []).length) next.imageCandidates = imageCandidates;
+        return next;
+      }) : [{
+        id: route.shortcode + '-1',
+        index: 1,
+        type: article.querySelector('video') ? 'video' : 'image',
+        posterUrl: allowedPoster || posterUrl || '',
+        imageCandidates,
+        videoCandidates: []
+      }];
+      // Skip pure-text stubs (no poster / candidates) — same rule as feed download button.
+      if (!media.some((item) => item.imageCandidates?.length || item.videoCandidates?.length || Model.allowedMediaUrl(item.posterUrl || '') || item.type === 'video')) continue;
+      posts.push({
+        id: route.shortcode,
+        shortcode: route.shortcode,
+        pageUrl: existing?.pageUrl || pageUrl,
+        title: title || existing?.title || route.shortcode,
+        kind: existing?.kind || (article.querySelector('video') ? 'video' : 'image'),
+        publishTime: publishTime || existing?.publishTime || '',
+        pinned,
+        timelineIndex: order,
+        onPage: true,
+        author: { username, avatar: upgradeAvatarUrl(snapshot.creator?.avatar || existing?.author?.avatar || '') },
+        media
+      });
     }
     mergeCreatorPosts(posts);
+    creatorCategories.set(category, new Set(mergePageOrder(previousOrder, [...seen]).filter((id) => postHasMedia(creatorPosts.get(id)))));
+    pruneTextOnlyCreatorPosts(category);
   }
 
   function visibleCreatorPosts() {
@@ -1291,10 +1560,12 @@
           }
         }));
         if (token !== creatorPrepareToken || creatorKey !== key || snapshot.kind !== 'profile') break;
+        pruneTextOnlyCreatorPosts(category);
         renderCreator();
       }
     } finally {
       if (token !== creatorPrepareToken) return;
+      pruneTextOnlyCreatorPosts(category);
       const wasPreparing = creatorPreparing;
       creatorPreparing = false;
       if (wasPreparing) renderCreator();
@@ -1306,13 +1577,62 @@
     }
   }
 
+  function formatPostDate(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return String(value).slice(0, 10);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return year + '-' + month + '-' + day;
+  }
+
+  function upgradeAvatarUrl(url) {
+    const href = Model.httpsUrl(url);
+    if (!href || !/profile_images/i.test(href)) return href;
+    return href
+      .replace(/_normal(\.[a-z0-9]+)?$/i, '_400x400$1')
+      .replace(/_x96(\.[a-z0-9]+)?$/i, '_400x400$1')
+      .replace(/_bigger(\.[a-z0-9]+)?$/i, '_400x400$1');
+  }
+
   function profileHeaderDetails() {
-    const header = document.querySelector('main header');
-    const images = [...(header?.querySelectorAll('img') || [])];
-    const avatar = images.find((image) => /头像|profile picture/i.test(image.alt || '')) || images[0];
-    const match = String(header?.textContent || '').match(/([\d,.]+)\s*(?:帖子|推文|posts)/i);
+    const username = String(snapshot.creator?.username || Model.routeFromUrl(location.href).username || '').replace(/^@/, '').toLowerCase();
+    const pick = (img) => {
+      const src = img?.currentSrc || img?.src || '';
+      return /profile_images/i.test(src) ? upgradeAvatarUrl(src) : '';
+    };
+    let avatar = '';
+    const selectors = [];
+    if (username) {
+      selectors.push(
+        'main [data-testid="UserAvatar-Container-' + username + '"] img',
+        'main [data-testid^="UserAvatar-Container-"] img',
+        'main a[href="/' + username + '"] img',
+        'main a[href="/' + username + '/photo"] img'
+      );
+    } else {
+      selectors.push('main [data-testid^="UserAvatar-Container-"] img');
+    }
+    for (const selector of selectors) {
+      for (const img of document.querySelectorAll(selector)) {
+        avatar = pick(img);
+        if (avatar) break;
+      }
+      if (avatar) break;
+    }
+    if (!avatar) {
+      const header = document.querySelector('main[role="main"] section, main [data-testid="primaryColumn"]');
+      for (const img of header?.querySelectorAll('img') || []) {
+        avatar = pick(img);
+        if (avatar) break;
+      }
+    }
+    if (!avatar) avatar = upgradeAvatarUrl(snapshot.creator?.avatar || '');
+    const textBlob = String(document.querySelector('main [data-testid="primaryColumn"]')?.textContent || '');
+    const match = textBlob.match(/([\d,.]+)\s*(?:帖子|推文|posts)/i);
     const total = match ? Number(match[1].replace(/[,.]/g, '')) : 0;
-    return { avatar: Model.httpsUrl(avatar?.currentSrc || avatar?.src || ''), total };
+    return { avatar, total };
   }
 
   function renderCreator() {
@@ -1343,10 +1663,12 @@
     const summary = node(creatorBody, 'section', 'x-creator-summary');
     const main = node(summary, 'div', 'x-creator-main');
     const avatar = node(main, 'div', 'x-creator-avatar');
-    const avatarUrl = headerDetails.avatar || Model.httpsUrl(profile.avatar || '');
+    const avatarUrl = headerDetails.avatar || upgradeAvatarUrl(profile.avatar || '');
     if (avatarUrl) {
       const img = node(avatar, 'img', '');
       img.alt = '';
+      img.referrerPolicy = 'no-referrer';
+      img.decoding = 'async';
       img.addEventListener('error', () => { img.remove(); avatar.textContent = (profile.username || 'I').slice(0, 1).toUpperCase(); }, { once: true });
       img.src = avatarUrl;
     } else avatar.textContent = (profile.username || 'I').slice(0, 1).toUpperCase();
@@ -1354,7 +1676,7 @@
     const username = String(profile.username || '').trim();
     const displayName = String(profile.displayName || '').trim();
     node(identity, 'strong', '', username ? '@' + username : (displayName || t('creator')));
-    node(identity, 'span', 'x-count', creatorPosts.size
+    node(identity, 'span', 'x-count', categoryPosts().length
       ? t('creatorPrepared', { ready: filteredCreatorPosts().filter(creatorReady).length, total: filteredCreatorPosts().length })
       : t('scanReady'));
     const refresh = button(summary, t(creatorPreparing ? 'creatorPreparing' : 'refreshPosts'), 'x-mini-button x-scan-btn', () => refreshCreatorPosts().catch((error) => setStatus(error.message, 'error')));
@@ -1397,21 +1719,30 @@
         if (addButton) addButton.disabled = !selectedPosts.size;
       });
       const slot = node(row, 'div', 'x-creator-cover-slot');
-      const poster = Model.httpsUrl(post.media?.[0]?.posterUrl || '');
-      const placeholder = node(slot, 'div', 'x-creator-cover x-creator-cover-ph' + (poster ? ' hidden' : ''));
-      if (poster) {
+      const media = post.media?.[0];
+      const placeholder = node(slot, 'div', 'x-creator-cover x-creator-cover-ph');
+      if (media && previewUrls(media).length) {
         const thumb = node(slot, 'img', 'x-creator-cover');
         thumb.alt = '';
-        thumb.referrerPolicy = 'no-referrer';
         thumb.loading = 'lazy';
-        thumb.addEventListener('error', () => { thumb.remove(); placeholder.classList.remove('hidden'); }, { once: true });
-        thumb.src = poster;
-      }
+        placeholder.classList.add('hidden');
+        setMediaPreview(thumb, media, () => {
+          thumb.remove();
+          placeholder.classList.remove('hidden');
+          showCreatorVideoCover(slot, media, placeholder);
+        });
+      } else showCreatorVideoCover(slot, media, placeholder);
       const body = node(row, 'div', 'x-creator-item-body');
       const link = node(body, 'a', 'x-creator-item-title', post.title || id);
       link.href = post.pageUrl || ('https://x.com/i/web/status/' + (post.shortcode || ''));
       link.target = '_blank';
-      node(body, 'div', 'x-creator-item-meta', [pageTypeLabel(post), post.media?.length ? t('mediaCount', { count: post.media.length }) : '', post.publishTime ? post.publishTime.slice(0, 10) : ''].filter(Boolean).join(' · '));
+      node(body, 'div', 'x-creator-item-meta', [
+        post.pinned ? t('pinnedPost') : '',
+        post.quotedMediaOnly ? t('quotedMediaBadge') : '',
+        pageTypeLabel(post),
+        post.media?.length ? t('mediaCount', { count: post.media.length }) : '',
+        formatPostDate(post.publishTime)
+      ].filter(Boolean).join(' · '));
       if (creatorItems(post).length && creatorItems(post).every(media => savedMediaKeys.has(downloadKey(post, media)))) node(body, 'span', 'x-batch-saved', t('batchSaved'));
       if (!creatorReady(post)) node(body, 'span', 'x-creator-resource-status', t('creatorNeedsResolve'));
     });
@@ -1954,20 +2285,9 @@
           for (const category of creatorCategories.keys()) if (category.startsWith(oldest + ':')) creatorCategories.delete(category);
           for (const attempt of creatorAutoAttempts.keys()) if (attempt.startsWith(oldest + ':')) creatorAutoAttempts.delete(attempt);
         }
-        if (shell.panel?.isOpen?.()) scanDomCreatorPosts();
       }
-      // X timeline responses already contain original images and MP4 variants.
-      // Preserve them instead of rebuilding every tweet from a DOM placeholder.
-      const posts = (payload.posts || []).filter((post) =>
-        post.author?.username?.toLowerCase() === creatorKey);
-      mergeCreatorPosts(posts);
-      if (!creatorCategories.has(creatorCategory())) creatorCategories.set(creatorCategory(), new Set());
-      posts.forEach((post) => {
-        creatorCategories.get(creatorCategory()).add(post.shortcode || post.id);
-        cacheResolved(post);
-      });
-      scanDomCreatorPosts();
-      scheduleCreatorResolve();
+      refreshProfileCreatorData(payload);
+      scheduleProfileDomScan();
     }
     if (payload.post) {
       const owner = payload.post.author?.username?.toLowerCase();
@@ -1990,7 +2310,12 @@
       creatorVisibleLimit = 60;
       if (payload.kind === 'profile') {
         const expectedUrl = location.href;
-        setTimeout(() => { if (location.href === expectedUrl && snapshot.kind === 'profile') { scanDomCreatorPosts(); renderCreator(); } }, 600);
+        setTimeout(() => {
+          if (location.href === expectedUrl && snapshot.kind === 'profile') {
+            refreshProfileCreatorData();
+            renderCreator();
+          }
+        }, 600);
       }
       route = location.href;
       selectedMedia = new Set();
