@@ -2022,24 +2022,6 @@
     reset.textContent = t('resetDefault');
     foot.append(status, reset);
     root.appendChild(foot);
-    [['skipDownloaded','batchSkipSaved'],['recordHistory','batchHistory']].forEach(([key,label]) => {
-      const row = node(root, 'label', 'x-dl-ad-setting');
-      const check = node(row, 'input', ''); check.type = 'checkbox'; check.checked = prefs[key] !== false;
-      node(row, 'span', '', t(label));
-      check.addEventListener('change', () => savePrefs({[key]:check.checked}).catch(error => setStatus(error.message,'error')));
-    });
-    const folderRow = node(root, 'label', 'x-batch-folder');
-    node(folderRow, 'span', '', t('batchFolder'));
-    const folders = node(folderRow, 'select', 'x-dl-settings-input');
-    [['flat','batchFlat'],['archive','batchArchive']].forEach(([value,label]) => { const option = node(folders,'option','',t(label)); option.value=value; });
-    folders.value = prefs.folderLayout || 'flat';
-    folders.addEventListener('change', () => savePrefs({folderLayout:folders.value}).catch(error => setStatus(error.message,'error')));
-    const concurrencyRow = node(root, 'label', 'x-batch-folder');
-    node(concurrencyRow, 'span', '', t('batchConcurrency'));
-    const concurrency = node(concurrencyRow, 'select', 'x-dl-settings-input');
-    [1,2,3].forEach(value => { const option=node(concurrency,'option','',String(value));option.value=String(value); });
-    concurrency.value=String(prefs.maxConcurrentDownloads || 1);
-    concurrency.addEventListener('change', () => savePrefs({maxConcurrentDownloads:Number(concurrency.value)}).catch(error => setStatus(error.message,'error')));
     const adSetting = node(root, 'label', 'x-dl-ad-setting');
     const adToggle = node(adSetting, 'input', '');
     adToggle.type = 'checkbox';
