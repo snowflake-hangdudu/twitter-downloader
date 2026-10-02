@@ -1201,29 +1201,25 @@
     const img = node(wrap, 'img', 'x-dl-cover');
     img.referrerPolicy = 'no-referrer';
     const first = post.media[0];
-    const poster = coverUrl(post, first);
     setMediaPreview(img, first, () => node(wrap, 'div', 'x-dl-cover-ph'));
     if (first?.type === 'video' && (first.posterUrl || first.imageCandidates?.length)) {
       button(coverCol, t('downloadCover'), 'x-dl-cover-download', () => enqueueMedia(post, [coverMediaFrom(first)]));
     }
     const side = node(card, 'div', 'x-dl-video-side');
-    node(side, 'div', 'x-dl-video-title', post.title || t('twitterPost'));
-    const authorLine = node(side, 'div', 'x-dl-video-author');
+    const content = node(side, 'div', 'x-dl-video-content');
+    node(content, 'div', 'x-dl-video-title', post.title || t('twitterPost'));
+    const authorLine = node(content, 'div', 'x-dl-video-author');
     const authors = post.authors?.length ? post.authors : [post.author];
     authors.forEach((author) => {
       const authorName = String(author?.username || '').replace(/^@/, '').trim();
-      if (!authorName) return;
+      if (!authorName || /[#\s]/.test(authorName)) return;
       const authorLink = node(authorLine, 'a', 'x-dl-author-link', '@' + authorName);
       authorLink.href = 'https://x.com/' + encodeURIComponent(authorName) + '/';
       authorLink.title = author.displayName || authorName;
     });
-    node(side, 'div', 'x-dl-video-sub', [pageTypeLabel(post), post.shortcode, t('mediaCount', { count: post.media.length })].filter(Boolean).join(' · '));
-    if (post.quotedMediaOnly) {
-      const quotedName = post.quotedAuthor?.username ? '@' + post.quotedAuthor.username : '';
-      node(side, 'p', 'x-muted', t('quotedMediaHint', { user: quotedName || t('quotedAuthorFallback') }));
-    } else if (post.quotedMedia?.length) {
-      node(side, 'p', 'x-muted', t('ownPlusQuotedHint', { count: post.quotedMedia.length }));
-    }
+    if (!authorLine.childNodes?.length) authorLine.remove?.();
+    const sub = node(content, 'div', 'x-dl-video-sub', [pageTypeLabel(post), t('mediaCount', { count: post.media.length })].filter(Boolean).join(' · '));
+    if (post.shortcode) sub.title = post.shortcode;
 
     if (post.media.length === 1) {
       const media = post.media[0];
@@ -1237,8 +1233,14 @@
         });
         retry.disabled = viewedPostLoading;
       } else {
-        const previewName = node(currentBody, 'p', 'x-dl-filename-preview', t('filenameLoading'));
-        taskFilename(post, media, resource).then((name) => { previewName.textContent = t('saveAs') + name; }).catch(() => {});
+        const previewName = node(currentBody, 'p', 'x-dl-filename-preview');
+        const previewLabel = node(previewName, 'span', 'x-dl-filename-preview-label', t('saveAs'));
+        const previewValue = node(previewName, 'span', 'x-dl-filename-preview-name', t('filenameLoading'));
+        taskFilename(post, media, resource).then((name) => {
+          previewLabel.textContent = t('saveAs');
+          previewValue.textContent = name;
+          previewName.title = name;
+        }).catch(() => {});
         if (media.type === 'video') button(currentBody, t('downloadVideo'), 'x-dl-btn x-dl-start', () => enqueueMedia(post, [media]));
         else button(currentBody, t('downloadImage'), 'x-dl-btn x-dl-start', () => enqueueMedia(post, [media]));
       }
